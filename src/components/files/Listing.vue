@@ -21,7 +21,7 @@
                        :title="$t('files.sortByName')"
                        :aria-label="$t('files.sortByName')">
                         <span>{{ $t('files.name') }}</span>
-                        <i class="material-icons">{{ nameIcon }}</i>
+                        <i class="material-icons">{{ icon }}</i>
                     </p>
 
                     <p :class="{ active: sizeSorted }" class="size"
@@ -31,7 +31,7 @@
                        :title="$t('files.sortBySize')"
                        :aria-label="$t('files.sortBySize')">
                         <span>{{ $t('files.size') }}</span>
-                        <i class="material-icons">{{ sizeIcon }}</i>
+                        <i class="material-icons">{{ icon }}</i>
                     </p>
                     <p :class="{ active: modifiedSorted }" class="modified"
                        role="button"
@@ -40,7 +40,7 @@
                        :title="$t('files.sortByLastModified')"
                        :aria-label="$t('files.sortByLastModified')">
                         <span>{{ $t('files.lastModified') }}</span>
-                        <i class="material-icons">{{ modifiedIcon }}</i>
+                        <i class="material-icons">{{ icon }}</i>
                     </p>
 
                 </div>
@@ -49,7 +49,7 @@
         <context-menu ref="menu"></context-menu>
         <h2 v-if="req.numDirs > 0">{{ $t('files.folders') }}</h2>
         <div v-if="req.numDirs > 0">
-            <item v-for="(item) in dirs" :key="base64(item.name)"
+            <item v-for="(item, index) in dirs" :key="item.index"
                   v-bind:index="item.index"
                   v-bind:name="item.name"
                   v-bind:isDir="item.isDir"
@@ -65,7 +65,7 @@
         <h2 v-if="req.numFiles > 0">{{ $t('files.files') }}</h2>
 
         <div v-if="req.numFiles > 0">
-            <item v-for="(item) in files" :key="base64(item.name)"
+            <item v-for="(item, index) in files" :key="item.index"
                   v-bind:index="item.index"
                   v-bind:name="item.name"
                   v-bind:isDir="item.isDir"
@@ -96,40 +96,43 @@
     import {users, files as api} from '@/api'
     import buttons from '@/utils/buttons'
     import ContextMenu from "../ContextMenu";
+    import * as url from "../../utils/url"
+    import * as pLimit from "promise-limit"
+    import moment from 'moment'
 
     export default {
         name: 'listing',
         components: {ContextMenu, Item},
         data: function () {
             return {
-                show: 50
+                show: 50,
+                sortField: '',
+                isAsc: false
             }
         },
         computed: {
             ...mapState(['req', 'selected', 'user', 'isShare']),
             nameSorted() {
-                return (this.req.sort === 'name')
+                return (this.sortField === 'name')
             },
             sizeSorted() {
-                return (this.req.sort === 'size')
+                return (this.sortField === 'size')
             },
             modifiedSorted() {
-                return (this.req.sort === 'modified')
-            },
-            ascOrdered() {
-                return (this.req.order === 'asc')
+                return (this.sortField === 'modified')
             },
             items() {
                 const dirs = []
                 const files = []
 
-                this.req.items.forEach((item) => {
-                    if (item.isDir) {
-                        dirs.push(item)
+                for (let i = 0; i < this.req.items.length; i++) {
+                    this.req.items[i].index = i
+                    if (this.req.items[i].isDir) {
+                        dirs.push(this.req.items[i])
                     } else {
-                        files.push(item)
+                        files.push(this.req.items[i])
                     }
-                })
+                }
 
                 return {dirs, files}
             },
@@ -143,27 +146,21 @@
 
                 return this.items.files.slice(0, show)
             },
-            nameIcon() {
-                if (this.nameSorted && !this.ascOrdered) {
-                    return 'arrow_upward'
-                }
-
-                return 'arrow_downward'
-            },
-            sizeIcon() {
-                if (this.sizeSorted && this.ascOrdered) {
-                    return 'arrow_downward'
-                }
-
-                return 'arrow_upward'
-            },
-            modifiedIcon() {
-                if (this.modifiedSorted && this.ascOrdered) {
-                    return 'arrow_downward'
-                }
-
-                return 'arrow_upward'
+            icon() {
+                return this.isAsc ? 'arrow_upward' : 'arrow_downward';
             }
+        },
+        beforeMount() {
+            if (this.sortField.length == 0) {
+                if (localStorage.sortField && localStorage.sortField.length > 0) {
+                    this.sortField = localStorage.sortField
+                } else {
+                    this.sortField = 'modified'
+                }
+            }
+
+            this.isAsc = localStorage.order == 'asc'
+            this.req.items = this.req.items.sort(this.comparator)
         },
         mounted() {
             // Check the columns size for the first time.
@@ -297,7 +294,10 @@
                 let files = dt.files
                 let el = event.target
 
-                if (files.length <= 0) return
+                if (files.length <= 0) {
+                    console.error("files empty")
+                    return
+                }
 
                 for (let i = 0; i < 5; i++) {
                     if (el !== null && !el.classList.contains('item')) {
@@ -378,10 +378,13 @@
 
                     this.$store.commit('setProgress', Math.ceil(sum / progress.length))
                 }
+                //limit concurrent upload
+                let limit = pLimit(2)
 
                 for (let i = 0; i < files.length; i++) {
                     let file = files[i]
-                    promises.push(api.post(this.$route.path + base + file.name, file, overwrite, onupload(i)))
+                    let path = this.$route.path + base + url.encodeRFC5987ValueChars(file.name)
+                    promises.push(limit(() => api.post(path, file, overwrite, onupload(i))))
                 }
 
                 let finish = () => {
@@ -401,21 +404,29 @@
 
                 return false
             },
-            sort(srt) {
-                let order = 'desc'
+            comparator: function (a, b) {
+                let rs = 0;
+                let v1 = a[this.sortField]
+                let v2 = b[this.sortField]
 
-                if (srt === 'name' && this.nameIcon === 'arrow_upward' ||
-                    srt === 'size' && this.sizeIcon === 'arrow_upward' ||
-                    srt === 'modified' && this.modifiedIcon === 'arrow_upward') {
-                    order = 'asc'
+                if (this.sortField === 'modified') {
+                    v1 = moment(v1).valueOf()
+                    v2 = moment(v2).valueOf()
                 }
 
-                let path = this.$store.state.baseURL
-                if (path === '') path = '/'
+                if (v1 < v2)
+                    rs = this.isAsc ? -1 : 1;
+                else if (v2 < v1)
+                    rs = this.isAsc ? 1 : -1;
 
-                document.cookie = `sort=${srt}; max-age=31536000; path=${path}`
-                document.cookie = `order=${order}; max-age=31536000; path=${path}`
-                this.setReload(true)
+                return rs;
+
+            },
+            sort(field) {
+                this.isAsc = !this.isAsc
+                localStorage.sortField = this.sortField = field
+                localStorage.order = this.isAsc ? 'asc' : 'desc'
+                this.req.items = this.req.items.sort(this.comparator)
             }
         }
     }
